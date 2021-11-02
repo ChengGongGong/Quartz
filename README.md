@@ -50,7 +50,16 @@
            4）初始化其他配置：包括SchedulerPlugins、JobListeners、TriggerListeners等；
            5）初始化threadExecutor(线程执行器)：默认为DefaultThreadExecutor；
            6）创建工作线程：根据配置创建N个工作thread，执行start()启动thread，并将N个thread顺序add进threadPool实例的空闲线程列表availWorkers中；
-           7）创建调度器线程：创建QuartzSchedulerThread实例，并通过threadExecutor.execute(实例)启动调度器线程；
-           8）创建调度器：创建StdScheduler实例，将上面所有配置和引用组合进实例中，并将实例存入调度器池中
+           7）创建调度器线程：创建QuartzSchedulerThread实例(paused=true,halted=false)，并通过threadExecutor.execute(实例)启动调度器线程；
+           8）创建调度器：创建StdScheduler实例，将上面所有配置和引用组合进实例中，并将实例存入调度器池中.
+    4. org.quartz.impl.StdScheduler#start，进行线程的启动，并执行相应的trigger。实际上是调用org.quartz.core.QuartzScheduler#start:
+     4.1 调用JobStore的schedulerStarted()方法进行启动 ，若是集群，初始化集群管理线程JobStoreSupport.ClusterManager，非集群，需要有恢复机制，恢复任何失败或misfire的作业；
+         初始化JobStoreSupport.MisfireHandler线程
+     4.2 调用QuartzSchedulerThread#togglePause(paused=false)唤醒所有等待的线程；
+     4.3 org.quartz.core.QuartzSchedulerThread#run，调度器线程一旦启动，将一直运行，在有可用线程的时候获取需要执行Trigger并出触发进行任务的调度；
+     	 1)  while()无限循环，每次循环取出时间将到的trigger，触发对应的job，直到调度器线程被关闭;
+	 2)  同步加锁，循环等待，进入休眠状态，直到QuartzScheduler.start()调用了togglePause(false)唤醒线程；
+	 3） 如果线程池中可用线程数大于0，获取马上到时间的trigger，且取出的trigger数不能超过一个阈值，并设置触发器状态为正在执行；
+	 4） 通过JobRunShell，实例化正在执行的job，org.quartz.simpl.SimpleJobFactory#newJob，并放到线程池中运行，org.quartz.core.JobRunShell#run，最终执行Job接口中的execute方法
 
         
