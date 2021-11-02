@@ -57,9 +57,161 @@
          初始化JobStoreSupport.MisfireHandler线程
      4.2 调用QuartzSchedulerThread#togglePause(paused=false)唤醒所有等待的线程；
      4.3 org.quartz.core.QuartzSchedulerThread#run，调度器线程一旦启动，将一直运行，在有可用线程的时候获取需要执行Trigger并出触发进行任务的调度；
-     	 1)  while()无限循环，每次循环取出时间将到的trigger，触发对应的job，直到调度器线程被关闭;
-	 2)  同步加锁，循环等待，进入休眠状态，直到QuartzScheduler.start()调用了togglePause(false)唤醒线程；
-	 3） 如果线程池中可用线程数大于0，获取马上到时间的trigger，且取出的trigger数不能超过一个阈值，并设置触发器状态为正在执行；
-	 4） 通过JobRunShell，实例化正在执行的job，org.quartz.simpl.SimpleJobFactory#newJob，并放到线程池中运行，org.quartz.core.JobRunShell#run，最终执行Job接口中的execute方法
+     	1)  while()无限循环，每次循环取出时间将到的trigger，触发对应的job，直到调度器线程被关闭;
+      	2)  同步加锁，循环等待，进入休眠状态，直到QuartzScheduler.start()调用了togglePause(false)唤醒线程；
+	    3) 如果线程池中可用线程数大于0，获取马上到时间的trigger，且取出的trigger数不能超过一个阈值，并设置触发器状态为正在执行；
+	    4) 通过JobRunShell，实例化正在执行的job，org.quartz.simpl.SimpleJobFactory#newJob，并放到线程池中运行，org.quartz.core.JobRunShell#run，最终执行Job接口中的execute方法
+quartz中避免GC的方式：
+    在类中创建一个ArrayList<Object>列表，如果某对象被添加进该队列，则意味着该类的实例引用了此对象，那么此对象至少在类实例存活时不会被GC。
+	
+## 2. 应用示例
+### 2.1 引入相关pom
+	<dependency>
+    <groupId>org.quartz-scheduler</groupId>
+    <artifactId>quartz</artifactId>
+    <version>2.3.0</version>
+	</dependency>
+### 2.2 使用SchedulerFactoryBean 创建Scheduler
+	以更具Bean风格的方式为Scheduler提供配置信息；
+	让Scheduler和Spring容器的生命周期建立关联；
+	通过属性配置部分或全部代替Quartz自身的配置文件。
+	
+@Configuration
+public class SchedulerPoolConfig implements InitializingBean {
 
-        
+    private static final Logger LOGGER = LoggerFactory.getLogger(SchedulerPoolConfig.class);
+
+    @Value("${scheduler.pool.redis.cluster}")
+    private String redisHost;
+
+    @Value("${scheduler.pool.thread.count}")
+    private String threadCount;
+
+    @Value("${scheduler.pool.size}")
+    private Integer poolSize;
+
+    private static final String SCHEDULER_KEY_PRE = "xxx";
+
+    //任务调度池,存储多个scheduler
+    private static final Map<String, Scheduler> SCHEDULER_MAP = new HashMap<>();
+
+    private static int SCHEDULER_MAP_SIZE = 0;
+
+    public static Scheduler getRandomScheduler(String uid) {
+        if (StringUtils.isEmpty(uid)) {
+            LOGGER.error("scheduler uid is null");
+            return null;
+        }
+        if (MapUtils.isEmpty(SCHEDULER_MAP)) {
+            LOGGER.error("scheduler map is not init , data is empty");
+            return null;
+        }
+        // 将调度器打散，随机获取其中某一个调度器，注意打散策略
+        int index = Math.abs(MD5Utils.digest(uid).hashCode()) % SCHEDULER_MAP_SIZE;
+        String schedulerKey = generateSchedulerKey(index);
+        return SCHEDULER_MAP.get(schedulerKey);
+    }
+
+	//配置ShedulerFactoryBean
+    public SchedulerFactoryBean schedulerFactoryBean(String keyPrefix, JobFactory jobFactory) throws Exception {
+        SchedulerFactoryBean factory = new SchedulerFactoryBean();
+        Properties quartzProperties = new Properties();
+		//此处采用开源的redis存储JobDetail和Trigger
+        quartzProperties.put("org.quartz.jobStore.class", "net.joelinn.quartz.jobstore.RedisJobStore");
+        quartzProperties.put("org.quartz.jobStore.host", redisHost);
+        quartzProperties.put("org.quartz.jobStore.redisCluster", "true");
+        quartzProperties.put("org.quartz.jobStore.keyPrefix", keyPrefix);
+        quartzProperties.put("org.quartz.threadPool.class", "org.quartz.simpl.SimpleThreadPool");
+        quartzProperties.put("org.quartz.jobStore.misfireThreshold", "600");
+        quartzProperties.put("org.quartz.threadPool.threadCount", threadCount);
+        factory.setQuartzProperties(quartzProperties);
+        factory.setJobFactory(jobFactory);
+        factory.afterPropertiesSet();
+        return factory;
+    }
+
+	//实现了InitializingBean接口，重写SchedulerFactoryBean中的afterPropertiesSet()方法
+    @Override
+    public void afterPropertiesSet() throws Exception {
+        JobFactory jobFactory = new MyJobFactory();
+		//自定义scheduler的数目
+        for (int i = 0; i < poolSize; i++) {
+            String keyPrefix = generateSchedulerKey(i);
+            Scheduler scheduler = schedulerFactoryBean(keyPrefix, jobFactory).getScheduler();
+            scheduler.start();
+            SCHEDULER_MAP.put(keyPrefix, scheduler);
+            LOGGER.info("scheduler:[key pref={}] init succ", keyPrefix);
+        }
+        SCHEDULER_MAP_SIZE = SCHEDULER_MAP.size();
+        addShutdownHook();
+
+        LOGGER.info("scheduler map init succ,size:{}", size);
+    }
+
+    private void addShutdownHook() {
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            LOGGER.info("scheduler pool shutdown begin...");
+            if (MapUtils.isEmpty(SCHEDULER_MAP)) {
+                return;
+            }
+
+            for (Map.Entry<String, Scheduler> scheduleEntry : SCHEDULER_MAP.entrySet()) {
+                try {
+                    scheduleEntry.getValue().shutdown(true);
+                } catch (SchedulerException e) {
+                    LOGGER.error("scheduler pool shutdown error|{}", scheduleEntry.getKey(), e);
+                }
+                LOGGER.info("schedule[keyPref:{}] shutdown succ", scheduleEntry.getKey());
+            }
+            LOGGER.info("scheduler pool shutdown end.");
+        }, "SchedulerPoolShutdownHook"));
+    }
+
+    private static String generateSchedulerKey(int i) {
+        return SCHEDULER_KEY_PRE + (i == 0 ? StringUtils.EMPTY : String.valueOf(i)) + "_";
+    }
+	
+	@Bean(name = "myJobFactory")
+    public JobFactory jobFactoryBean {
+        return new MyJobFactory();
+    }
+
+}
+
+	//自定义JobFactory，	
+	@Component  
+	public class MyJobFactory extends AdaptableJobFactory { 
+	
+	 private static ConcurrentHashMap<String, Object> JOB_INSTANCE = new ConcurrentHashMap<>(16);
+  
+	//将ApplicationContext之外的一些instance实例加入到Spring Application上下文中
+    @Autowired    
+    private AutowireCapableBeanFactory capableBeanFactory;    
+  
+    @Override    
+    protected Object createJobInstance(TriggerFiredBundle bundle) throws Exception {    
+        //获取当前jobInstance实例
+		String instanceKey = bundle.getJobDetail().getJobClass().getSimpleName();
+        Object jobInstance = JOB_INSTANCE.get(instanceKey);
+        if(jobInstance==null){	
+			jobInstance = super.createJobInstance(bundle);    
+        	capableBeanFactory.autowireBean(jobInstance);
+			JOB_INSTANCE.put(instanceKey,jobInstance);
+		}   
+        return jobInstance;    
+    }
+	
+	//自定义Job
+	public class MyJob implements Job {
+		@Override
+    	public void execute(JobExecutionContext context){
+			JobDataMap dataMap = context.getMergedJobDataMap();
+			//具体的业务逻辑
+			//或使用Scheduler重规划任务
+			Scheduler scheduler = context.getScheduler();
+            JobDetail jobDetail = context.getJobDetail();
+            Trigger trigger = context.getTrigger();
+			//具体的业务逻辑
+		}
+	}
+}  
