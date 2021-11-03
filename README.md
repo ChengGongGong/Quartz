@@ -249,6 +249,8 @@ quartz中避免GC的方式：
                 triggerScheduler.scheduleJob(quartzJob, quartzTrigger);
 		}	
 	}
+	
+	//自定义cron生成工具类
 	public class TriggerUtils{
 		public static CronScheduleBuilder buildShceduleCron() {
 			long startTime=System.currentTimeMillis();
@@ -277,6 +279,199 @@ quartz中避免GC的方式：
                 .build().generate();
         	return CronScheduleBuilder.cronSchedule(cronExpression).withMisfireHandlingInstructionDoNothing();
     	}
-	}
 	
-}  
+		private CronTrigger createTrigger(final String cron) {
+        	return CronScheduleBuilder.cronSchedule(cron).withMisfireHandlingInstructionDoNothing();
+    	}
+   }
+	
+	//cron生成类转换
+	public class CronExpressionGenerator {
+    	private static final String DELIMITER = " ";
+    	private String second;
+    	private String minite;
+    	private String hour;
+    	private String dayOfMonth;
+    	private String month;
+    	private String dayOfWeek;
+    	private String year;
+
+    public String generate() {
+        return String.join(DELIMITER, new String[]{second, minite, hour, dayOfMonth, month, dayOfWeek, year});
+    }
+
+    public static final class Builder {
+        private String second = "0";
+        private String minite = "0";
+        private String hour = "0";
+        private String dayOfMonth = "?";
+        private String month = "*";
+        private String dayOfWeek = "?";
+        private String year = "*";
+
+        private Builder() {
+        }
+
+        public static Builder aCronExpression() {
+            return new Builder();
+        }
+
+        public Builder withSecond(String second) {
+            this.second = second;
+            return this;
+        }
+
+        public Builder withMinite(String minite) {
+            this.minite = minite;
+            return this;
+        }
+
+        public Builder withHour(String hour) {
+            this.hour = hour;
+            return this;
+        }
+
+        public Builder withDayOfMonth(String dayOfMonth) {
+            this.dayOfMonth = dayOfMonth;
+            return this;
+        }
+
+        public Builder withMonth(String month) {
+            this.month = month;
+            return this;
+        }
+
+        public Builder withDayOfWeek(String dayOfWeek) {
+            this.dayOfWeek = dayOfWeek;
+            return this;
+        }
+
+        public Builder withYear(String year) {
+            this.year = year;
+            return this;
+        }
+
+        public CronExpressionGenerator build() {
+            CronExpressionGenerator cronExpression = new CronExpressionGenerator();
+            cronExpression.hour = this.hour;
+            cronExpression.dayOfMonth = this.dayOfMonth;
+            cronExpression.minite = this.minite;
+            cronExpression.dayOfWeek = this.dayOfWeek;
+            cronExpression.second = this.second;
+            cronExpression.month = this.month;
+            cronExpression.year = this.year;
+            return cronExpression;
+        }
+    }
+ }
+
+## 2. JobStore-集群方式
+### 2.1 JDBC的方式
+	数据库表：https://github.com/quartz-scheduler/quartz/blob/master/quartz-core/src/main/resources/org/quartz/impl/jdbcjobstore/tables_mysql_innodb.sql
+	数据库表的详解：https://www.jianshu.com/p/b94ebb8780fa
+	属性配置：
+		#同一集群中应用采用相同的Scheduler实例
+		org.quartz.scheduler.instanceName: wenqyScheduler
+
+		#集群节点的ID必须唯一，可由quartz自动生成
+		org.quartz.scheduler.instanceId: AUTO
+
+		#通知Scheduler实例要它参与到一个集群当中
+		org.quartz.jobStore.isClustered: true
+
+		#需持久化存储
+		org.quartz.jobStore.class=org.quartz.impl.jdbcjobstore.JobStoreTX
+		org.quartz.jobStore.driverDelegateClass=org.quartz.impl.jdbcjobstore.StdJDBCDelegate
+
+		#数据源
+		org.quartz.jobStore.dataSource=myDS
+
+		#quartz表前缀
+		org.quartz.jobStore.tablePrefix=QRTZ_
+
+		#数据源配置
+		org.quartz.dataSource.myDS.driver: com.mysql.jdbc.Driver
+		org.quartz.dataSource.myDS.URL: jdbc:mysql://localhost:3306/ncdb
+		org.quartz.dataSource.myDS.user: root
+		org.quartz.dataSource.myDS.password: 123456
+		org.quartz.dataSource.myDS.maxConnections: 5
+		org.quartz.dataSource.myDS.validationQuery: select 0
+	具体原理：
+		![image](https://user-images.githubusercontent.com/41152743/140027174-6a155141-1976-40d3-9e4e-3dcba30fcaab.png)
+
+	    1. org.quartz.impl.jdbcjobstore.JobStoreSupport#acquireNextTrigger
+		   1）从QRTZ_LOCKS表中，获取数据库锁，取到行级锁TRIGGER_ACCESS,执行成功后,数据库对该行锁定。
+				另外一个线程使用相同的SQL对表的数据进行查询，只能等待，直到该行锁的线程完成了相关的操作。保证了同一个集群下，只有一个quartz实例获取需要执行的trigger
+	       2）从QRTZ_TRIGGER表中，获取30s内且触发状态为WAITTING的Trigger，并按优先级排序；
+	       3）根据Trigger的JobKey从qrtz_job_details表中获取详细的job信息；
+		   4）在QRTZ_TRIGGER表中修改Trigger的状态为ACQUIRED，
+		   5）然后将待触发的Trigger插入到qrtz_fired_triggers中
+	       6）提交获取Trigger的事务，行锁被释放，返回待触发的Trigeer列表；
+	
+	    2. org.quartz.impl.jdbcjobstore.JobStoreSupport#triggersFired
+		   通知JobStore触发trigger，获取数据库锁，从QRTZ_LOCKS表中获取STATE_ACCESS行级锁;
+		   从QRTZ_TRIGGER表中确认trigger的状态；
+	       从qrtz_job_details表中获取job信息；
+	       从qrtz_calendars表中获取trigger的calendar信息；
+	       从qrtz_fired_triggers表中更新trigger的状态为EXECUTING；
+	       在QRTZ_TRIGGER表中根据下次触发时间、是否允许并发等信息更新trigger的状态信息，持久化Trigger，并更新下次触发时间，
+	       最后提交触发trigger的事务，行锁被释放，返回待执行的JobDetail信息；
+	
+	   3. 集群故障转移 org.quartz.impl.jdbcjobstore.JobStoreSupport#doCheckin
+			每个服务器会定时（org.quartz.jobStore.clusterCheckinInterval这个时间）更新SCHEDULER_STATE表中的LAST_CHECK_TIME，检测集群的scheduler的实例状态信息；
+			如果发现服务超时，则会尝试接替该服务为完成的作业，在qrtz_fired_triggers中更新触发器的状态，然后从qrtz_scheduler_state表中删除故障节点。
+			故障节点触发器更新前状态	更新后状态
+				BLOCK	                WAITING
+                PAUSED_BLOCK        	PAUSED
+                ACQUIRED	           WAITING
+                COMPLETE	         无，删除Trigger
+## 3. misfire机制
+### 3.1 CronTrigger的misfire机制
+	1. withMisfireHandlingInstructionDoNothing() -> misfireInstruction = 2
+	不触发立即执行，等待下次Cron触发频率到达时刻开始按照cron频率依次执行；
+	2. withMisfireHandlingInstructionFireAndProceed -> misfireInstruction = 1
+	以当前时间为触发频率立刻触发一次执行，然后按照cron频率依次执行；
+	3. withMisfireHandlingInstructionIgnoreMisfires -> misfireInstruction = -1
+	以错过的第一个频率时间立刻开始执行，重做错过的所有频率周期后，当下一次触发频率发生时间大于当前时间后，按照正常的cron频率依次执行；
+### 3.2 SimpleTrigger的misfire机制
+	withMisfireHandlingInstructionFireNow
+		——以当前时间为触发频率立即触发执行
+		——执行至FinalTIme的剩余周期次数
+		——以调度或恢复调度的时刻为基准的周期频率，FinalTime根据剩余次数和当前时间计算得到
+		——调整后的FinalTime会略大于根据starttime计算的到的FinalTime值
+
+	withMisfireHandlingInstructionIgnoreMisfires
+		——以错过的第一个频率时间立刻开始执行
+		——重做错过的所有频率周期
+		——当下一次触发频率发生时间大于当前时间以后，按照Interval的依次执行剩下的频率
+		——共执行RepeatCount+1次
+
+	withMisfireHandlingInstructionNextWithExistingCount
+		——不触发立即执行
+		——等待下次触发频率周期时刻，执行至FinalTime的剩余周期次数
+		——以startTime为基准计算周期频率，并得到FinalTime
+		——即使中间出现pause，resume以后保持FinalTime时间不变
+
+
+	withMisfireHandlingInstructionNowWithExistingCount
+		——以当前时间为触发频率立即触发执行
+		——执行至FinalTIme的剩余周期次数
+		——以调度或恢复调度的时刻为基准的周期频率，FinalTime根据剩余次数和当前时间计算得到
+		——调整后的FinalTime会略大于根据starttime计算的到的FinalTime值
+
+	withMisfireHandlingInstructionNextWithRemainingCount
+		——不触发立即执行
+		——等待下次触发频率周期时刻，执行至FinalTime的剩余周期次数
+		——以startTime为基准计算周期频率，并得到FinalTime
+		——即使中间出现pause，resume以后保持FinalTime时间不变
+
+	withMisfireHandlingInstructionNowWithRemainingCount
+		——以当前时间为触发频率立即触发执行
+		——执行至FinalTIme的剩余周期次数
+		——以调度或恢复调度的时刻为基准的周期频率，FinalTime根据剩余次数和当前时间计算得到
+		——调整后的FinalTime会略大于根据starttime计算的到的FinalTime值
+
+	MISFIRE_INSTRUCTION_RESCHEDULE_NOW_WITH_REMAINING_REPEAT_COUNT
+		——此指令导致trigger忘记原始设置的starttime和repeat-count
+		——触发器的repeat-count将被设置为剩余的次数
+		——这样会导致后面无法获得原始设定的starttime和repeat-count值
