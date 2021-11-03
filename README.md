@@ -76,52 +76,47 @@ quartz中避免GC的方式：
 	让Scheduler和Spring容器的生命周期建立关联；
 	通过属性配置部分或全部代替Quartz自身的配置文件。
 	
-@Configuration
-public class SchedulerPoolConfig implements InitializingBean {
-
-    private static final Logger LOGGER = LoggerFactory.getLogger(SchedulerPoolConfig.class);
+	@Configuration
+	@Slf4j
+	public class QuartzConfig implements InitializingBean {
 
     @Value("${scheduler.pool.redis.cluster}")
     private String redisHost;
 
     @Value("${scheduler.pool.thread.count}")
-    private String threadCount;
+    private Integer threadCount;
 
     @Value("${scheduler.pool.size}")
     private Integer poolSize;
 
     private static final String SCHEDULER_KEY_PRE = "xxx";
 
+
     //任务调度池,存储多个scheduler
-    private static final Map<String, Scheduler> SCHEDULER_MAP = new HashMap<>();
+    private static final Map<String, Scheduler> SCHEDULER_MAP = new HashMap<>(16);
 
-    private static int SCHEDULER_MAP_SIZE = 0;
-
-    public static Scheduler getRandomScheduler(String uid) {
-        if (StringUtils.isEmpty(uid)) {
-            LOGGER.error("scheduler uid is null");
-            return null;
-        }
-        if (MapUtils.isEmpty(SCHEDULER_MAP)) {
-            LOGGER.error("scheduler map is not init , data is empty");
-            return null;
-        }
-        // 将调度器打散，随机获取其中某一个调度器，注意打散策略
-        int index = Math.abs(MD5Utils.digest(uid).hashCode()) % SCHEDULER_MAP_SIZE;
-        String schedulerKey = generateSchedulerKey(index);
-        return SCHEDULER_MAP.get(schedulerKey);
+    @Bean(name = "myJobFactory")
+    public JobFactory jobFactoryBean() {
+        return new MyJobFactory();
     }
 
-	//配置ShedulerFactoryBean
+    /**
+     * 配置SchedulerFactoryBean,自动注入bean
+     *
+     * @param keyPrefix
+     * @param jobFactory
+     * @return
+     * @throws Exception
+     */
     public SchedulerFactoryBean schedulerFactoryBean(String keyPrefix, JobFactory jobFactory) throws Exception {
         SchedulerFactoryBean factory = new SchedulerFactoryBean();
         Properties quartzProperties = new Properties();
-		//此处采用开源的redis存储JobDetail和Trigger
+        //此处采用开源的redis存储JobDetail和Trigger
         quartzProperties.put("org.quartz.jobStore.class", "net.joelinn.quartz.jobstore.RedisJobStore");
         quartzProperties.put("org.quartz.jobStore.host", redisHost);
         quartzProperties.put("org.quartz.jobStore.redisCluster", "true");
         quartzProperties.put("org.quartz.jobStore.keyPrefix", keyPrefix);
-        quartzProperties.put("org.quartz.threadPool.class", "org.quartz.simpl.SimpleThreadPool");
+        quartzProperties.put("org.quartz.threadPool.class", org.quartz.simpl.SimpleThreadPool.class.getName());
         quartzProperties.put("org.quartz.jobStore.misfireThreshold", "600");
         quartzProperties.put("org.quartz.threadPool.threadCount", threadCount);
         factory.setQuartzProperties(quartzProperties);
@@ -130,27 +125,46 @@ public class SchedulerPoolConfig implements InitializingBean {
         return factory;
     }
 
-	//实现了InitializingBean接口，重写SchedulerFactoryBean中的afterPropertiesSet()方法
+    public static Scheduler getRandomScheduler(String uid) {
+        if (StringUtils.isEmpty(uid)) {
+            log.error("scheduler uid is null");
+            return null;
+        }
+        if (SCHEDULER_MAP.isEmpty()||SCHEDULER_MAP==null) {
+            log.error("scheduler map is not init , data is empty");
+            return null;
+        }
+        // 将调度器打散，随机获取其中某一个调度器，注意打散策略
+        int index = Math.abs(MD5Utils.digest(uid).hashCode()) % SCHEDULER_MAP.size();
+        String schedulerKey = generateSchedulerKey(index);
+        return SCHEDULER_MAP.get(schedulerKey);
+    }
+
+    /**
+     *  实现了InitializingBean接口，重写SchedulerFactoryBean中的afterPropertiesSet()方法
+     *  生成自定义数目的scheduler
+     * @throws Exception
+     */
     @Override
     public void afterPropertiesSet() throws Exception {
         JobFactory jobFactory = new MyJobFactory();
-		//自定义scheduler的数目
         for (int i = 0; i < poolSize; i++) {
             String keyPrefix = generateSchedulerKey(i);
             Scheduler scheduler = schedulerFactoryBean(keyPrefix, jobFactory).getScheduler();
             scheduler.start();
             SCHEDULER_MAP.put(keyPrefix, scheduler);
-            LOGGER.info("scheduler:[key pref={}] init succ", keyPrefix);
+            log.info("scheduler:[key pref={}] init succ", keyPrefix);
         }
-        SCHEDULER_MAP_SIZE = SCHEDULER_MAP.size();
         addShutdownHook();
 
-        LOGGER.info("scheduler map init succ,size:{}", size);
+        log.info("scheduler map init succ,size:{}", poolSize);
     }
 
+    /**
+     * 当前的scheduler还有未执行完的任务.将会挂起
+     */
     private void addShutdownHook() {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
-            LOGGER.info("scheduler pool shutdown begin...");
             if (MapUtils.isEmpty(SCHEDULER_MAP)) {
                 return;
             }
@@ -159,49 +173,47 @@ public class SchedulerPoolConfig implements InitializingBean {
                 try {
                     scheduleEntry.getValue().shutdown(true);
                 } catch (SchedulerException e) {
-                    LOGGER.error("scheduler pool shutdown error|{}", scheduleEntry.getKey(), e);
+                    log.error("scheduler pool shutdown error|{}", scheduleEntry.getKey(), e);
                 }
-                LOGGER.info("schedule[keyPref:{}] shutdown succ", scheduleEntry.getKey());
+                log.info("schedule[keyPref:{}] shutdown succ", scheduleEntry.getKey());
             }
-            LOGGER.info("scheduler pool shutdown end.");
-        }, "SchedulerPoolShutdownHook"));
+        }, "schedulerHalt"));
     }
 
     private static String generateSchedulerKey(int i) {
         return SCHEDULER_KEY_PRE + (i == 0 ? StringUtils.EMPTY : String.valueOf(i)) + "_";
     }
-	
-	@Bean(name = "myJobFactory")
-    public JobFactory jobFactoryBean {
-        return new MyJobFactory();
-    }
-
 }
 
-	//自定义JobFactory，	
-	@Component  
-	public class MyJobFactory extends AdaptableJobFactory { 
+   
+
+   //自定义JobFactory，
 	
-	 private static ConcurrentHashMap<String, Object> JOB_INSTANCE = new ConcurrentHashMap<>(16);
+   @Component  
+   public class MyJobFactory extends AdaptableJobFactory { 
+	
+   	private static ConcurrentHashMap<String, Object> JOB_INSTANCE = new ConcurrentHashMap<>(16);
   
 	//将ApplicationContext之外的一些instance实例加入到Spring Application上下文中
     @Autowired    
     private AutowireCapableBeanFactory capableBeanFactory;    
   
-    @Override    
-    protected Object createJobInstance(TriggerFiredBundle bundle) throws Exception {    
+   	 @Override    
+     protected Object createJobInstance(TriggerFiredBundle bundle) throws Exception {    
         //获取当前jobInstance实例
 		String instanceKey = bundle.getJobDetail().getJobClass().getSimpleName();
         Object jobInstance = JOB_INSTANCE.get(instanceKey);
         if(jobInstance==null){	
-			jobInstance = super.createJobInstance(bundle);    
-        	capableBeanFactory.autowireBean(jobInstance);
-			JOB_INSTANCE.put(instanceKey,jobInstance);
+				jobInstance = super.createJobInstance(bundle);    
+        		capableBeanFactory.autowireBean(jobInstance);
+				JOB_INSTANCE.put(instanceKey,jobInstance);
 		}   
-        return jobInstance;    
-    }
+        	return jobInstance;    
+    	}
+   }
 	
 	//自定义Job
+	
 	public class MyJob implements Job {
 		@Override
     	public void execute(JobExecutionContext context){
@@ -214,4 +226,57 @@ public class SchedulerPoolConfig implements InitializingBean {
 			//具体的业务逻辑
 		}
 	}
+	
+	//自定义trigger并触发任务
+	
+	public class MyTrigger{
+	   private static final String TRIGGER_GROUP = "xxx-trigger";
+	   private static final String TRIGGER_NAME="tg_";
+	   private static final String JOB_NAME="job_"
+	   public void handle(String uid,String data ){
+		   Scheduler triggerScheduler = SchedulerPoolConfig.getRandomScheduler(uid);
+		   TriggerKey triggerKey = new TriggerKey(TRIGGER_NAME+data,TRIGGER_GROUP);
+		   Trigger quartzTrigger = TriggerBuilder
+                    .newTrigger()
+                    .withIdentity(triggerKey)
+                    .withSchedule(TriggerUtils.buildShceduleCron())
+                    .usingJobData(xxx, data))
+                    .build();
+		  if (!triggerScheduler.checkExists(triggerKey)) {
+                JobDetail quartzJob = JobBuilder.newJob(MyJob.class)
+                        .withIdentity(JOB_NAME+ data, TRIGGER_GROUP)
+                        .build();
+                triggerScheduler.scheduleJob(quartzJob, quartzTrigger);
+		}	
+	}
+	public class TriggerUtils{
+		public static CronScheduleBuilder buildShceduleCron() {
+			long startTime=System.currentTimeMillis();
+			int plusHours=2;
+        	LocalDateTime ldt;
+        	try {
+            	ldt = LocalDateTime.
+                    	 ofInstant(Instant.ofEpochMilli(startTime), ZoneId.systemDefault())
+                    	.plusHours(plusHours);
+        	} catch (Exception e) {
+            	logger.error("failed to parse local date time. startTime:[{}]", startTime);
+            	ldt = LocalDateTime.now();
+        	}
+
+        	String year = String.valueOf(ldt.getYear());
+        	String month = String.valueOf(ldt.getMonthValue());
+        	String day = String.valueOf(ldt.getDayOfMonth());
+        	String hour = String.valueOf(ldt.getHour());
+        	String minute = String.valueOf(ldt.getMinute());
+        	String cronExpression = CronExpressionGenerator.Builder.aCronExpression()
+                .withYear(year)
+                .withMonth(month)
+                .withDayOfMonth(day)
+                .withHour(hour)
+                .withMinite(minute)
+                .build().generate();
+        	return CronScheduleBuilder.cronSchedule(cronExpression).withMisfireHandlingInstructionDoNothing();
+    	}
+	}
+	
 }  
