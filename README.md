@@ -397,7 +397,7 @@ quartz中避免GC的方式：
 		org.quartz.dataSource.myDS.maxConnections: 5
 		org.quartz.dataSource.myDS.validationQuery: select 0
 	具体原理：
-		![image](https://user-images.githubusercontent.com/41152743/140027174-6a155141-1976-40d3-9e4e-3dcba30fcaab.png)
+		 ![Image_text](https://user-images.githubusercontent.com/41152743/140027174-6a155141-1976-40d3-9e4e-3dcba30fcaab.png)
 
 	    1. org.quartz.impl.jdbcjobstore.JobStoreSupport#acquireNextTrigger
 		   1）从QRTZ_LOCKS表中，获取数据库锁，取到行级锁TRIGGER_ACCESS,执行成功后,数据库对该行锁定。
