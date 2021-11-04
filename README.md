@@ -66,7 +66,7 @@ quartz中避免GC的方式：
 	
 ## 2. 应用示例
 ### 2.1 引入相关pom
-	<dependency>
+    <dependency>
     <groupId>org.quartz-scheduler</groupId>
     <artifactId>quartz</artifactId>
     <version>2.3.0</version>
@@ -216,13 +216,13 @@ quartz中避免GC的方式：
 	
 	public class MyJob implements Job {
 		@Override
-    	public void execute(JobExecutionContext context){
+    		public void execute(JobExecutionContext context){
 			JobDataMap dataMap = context.getMergedJobDataMap();
 			//具体的业务逻辑
 			//或使用Scheduler重规划任务
 			Scheduler scheduler = context.getScheduler();
-            JobDetail jobDetail = context.getJobDetail();
-            Trigger trigger = context.getTrigger();
+            		JobDetail jobDetail = context.getJobDetail();
+            		Trigger trigger = context.getTrigger();
 			//具体的业务逻辑
 		}
 	}
@@ -253,8 +253,8 @@ quartz中避免GC的方式：
 	//自定义cron生成工具类
 	public class TriggerUtils{
 		public static CronScheduleBuilder buildShceduleCron() {
-			long startTime=System.currentTimeMillis();
-			int plusHours=2;
+		long startTime=System.currentTimeMillis();
+		int plusHours=2;
         	LocalDateTime ldt;
         	try {
             	ldt = LocalDateTime.
@@ -400,31 +400,31 @@ quartz中避免GC的方式：
 ![Image_text](https://user-images.githubusercontent.com/41152743/140027174-6a155141-1976-40d3-9e4e-3dcba30fcaab.png)
 
 	    1. org.quartz.impl.jdbcjobstore.JobStoreSupport#acquireNextTrigger
-		   1）从QRTZ_LOCKS表中，获取数据库锁，取到行级锁TRIGGER_ACCESS,执行成功后,数据库对该行锁定。
-				另外一个线程使用相同的SQL对表的数据进行查询，只能等待，直到该行锁的线程完成了相关的操作。保证了同一个集群下，只有一个quartz实例获取需要执行的trigger
+	       1）从QRTZ_LOCKS表中，获取数据库锁，取到行级锁TRIGGER_ACCESS,执行成功后,数据库对该行锁定。
+		另外一个线程使用相同的SQL对表的数据进行查询，只能等待，直到该行锁的线程完成了相关的操作。保证了同一个集群下，只有一个quartz实例获取需要执行的trigger
 	       2）从QRTZ_TRIGGER表中，获取30s内且触发状态为WAITTING的Trigger，并按优先级排序；
 	       3）根据Trigger的JobKey从qrtz_job_details表中获取详细的job信息；
-		   4）在QRTZ_TRIGGER表中修改Trigger的状态为ACQUIRED，
-		   5）然后将待触发的Trigger插入到qrtz_fired_triggers中
+	       4）在QRTZ_TRIGGER表中修改Trigger的状态为ACQUIRED，
+	       5）然后将待触发的Trigger插入到qrtz_fired_triggers中
 	       6）提交获取Trigger的事务，行锁被释放，返回待触发的Trigeer列表；
 	
 	    2. org.quartz.impl.jdbcjobstore.JobStoreSupport#triggersFired
-		   通知JobStore触发trigger，获取数据库锁，从QRTZ_LOCKS表中获取STATE_ACCESS行级锁;
-		   从QRTZ_TRIGGER表中确认trigger的状态；
-	       从qrtz_job_details表中获取job信息；
-	       从qrtz_calendars表中获取trigger的calendar信息；
-	       从qrtz_fired_triggers表中更新trigger的状态为EXECUTING；
-	       在QRTZ_TRIGGER表中根据下次触发时间、是否允许并发等信息更新trigger的状态信息，持久化Trigger，并更新下次触发时间，
-	       最后提交触发trigger的事务，行锁被释放，返回待执行的JobDetail信息；
+	       1) 通知JobStore触发trigger，获取数据库锁，从QRTZ_LOCKS表中获取STATE_ACCESS行级锁;
+	       2) 从QRTZ_TRIGGER表中确认trigger的状态；
+	       3) 从qrtz_job_details表中获取job信息；
+	       4) 从qrtz_calendars表中获取trigger的calendar信息；
+	       5) 从qrtz_fired_triggers表中更新trigger的状态为EXECUTING；
+	       6) 在QRTZ_TRIGGER表中根据下次触发时间、是否允许并发等信息更新trigger的状态信息，持久化Trigger，并更新下次触发时间，
+	       7) 最后提交触发trigger的事务，行锁被释放，返回待执行的JobDetail信息；
 	
 	   3. 集群故障转移 org.quartz.impl.jdbcjobstore.JobStoreSupport#doCheckin
-			每个服务器会定时（org.quartz.jobStore.clusterCheckinInterval这个时间）更新SCHEDULER_STATE表中的LAST_CHECK_TIME，检测集群的scheduler的实例状态信息；
-			如果发现服务超时，则会尝试接替该服务为完成的作业，在qrtz_fired_triggers中更新触发器的状态，然后从qrtz_scheduler_state表中删除故障节点。
-			故障节点触发器更新前状态	更新后状态
-				BLOCK	                WAITING
-                PAUSED_BLOCK        	PAUSED
-                ACQUIRED	           WAITING
-                COMPLETE	         无，删除Trigger
+		每个服务器会定时（org.quartz.jobStore.clusterCheckinInterval这个时间）更新SCHEDULER_STATE表中的LAST_CHECK_TIME，检测集群的scheduler的实例状态信息；
+		如果发现服务超时，则会尝试接替该服务为完成的作业，在qrtz_fired_triggers中更新触发器的状态，然后从qrtz_scheduler_state表中删除故障节点。
+		故障节点触发器更新前状态	    更新后状态
+			BLOCK	                WAITING
+                    PAUSED_BLOCK        	PAUSED
+                      ACQUIRED	                WAITING
+                      COMPLETE	             无，删除Trigger
 ## 3. misfire机制
 ### 3.1 CronTrigger的misfire机制
 	1. withMisfireHandlingInstructionDoNothing() -> misfireInstruction = 2
